@@ -1,0 +1,1062 @@
+> 笔记：[Kafka入门到精通 (gitee.io)](https://bright-boy.gitee.io/technical-notes/#/kafka/kafka)
+>
+> 视频：[千锋教育最新kafka入门到精通教程|kafka快速入门，阿里P7架构师带你深度解析_哔哩哔哩_bilibili](https://www.bilibili.com/video/BV1Xy4y1G7zA?from=search&seid=17295069174263186981&spm_id_from=333.337.0.0)
+
+# 01 消息队列的流派
+
+## 1.1 什么是MQ
+
+Message Queue（MQ），消息队列中间件。很多人都说：MQ 通过将消息的发送和接收分离来实现应用程序的异步和解偶，这个给人的直觉是——MQ 是异步的，用来解耦的，但是这个只是 MQ 的效果而不是目的。MQ 真正的目的是为了通讯，屏蔽底层复杂的通讯协议，定义了一套应用层的、更加简单的通讯协议。一个分布式系统中两个模块之间通讯要么是HTTP，要么是自己开发的（rpc） TCP，但是这两种协议其实都是原始的协议。HTTP 协议很难实现两端通讯——模块 A 可以调用 B，B 也可以主动调用 A，如果要做到这个两端都要背上WebServer，而且还不支持⻓连接（HTTP 2.0 的库根本找不到）。TCP 就更加原始了，粘包、心跳、私有的协议，想一想头皮就发麻。MQ 所要做的就是在这些协议之上构建一个简单的“协议”——**生产者/消费者模型**。MQ 带给我的“协议”不是具体的通讯协议，而是更高层次通讯模型。它定义了两个对象——发送数据的叫生产者；接收数据的叫消费者， 提供一个SDK 让我们可以定义自己的生产者和消费者实现消息通讯而无视底层通讯协议
+
+## 1.2 有Broker的MQ
+
+这个流派通常有一台服务器作为 Broker，所有的消息都通过它中转。生产者把消息发送给它就结束自己的任务了，Broker 则把消息主动推送给消费者（或者消费者主动轮询）
+
+### 1.3 重Topic
+
+kafka、JMS（ActiveMQ）就属于这个流派，生产者会发送 key 和数据到 Broker，由 Broker比较 key 之后决定给哪个消费者。这种模式是我们最常⻅的模式，是我们对 MQ 最多的印象。在这种模式下一个 topic 往往是一个比较大的概念，甚至一个系统中就可能只有一个topic，topic 某种意义上就是 queue，生产者发送 key 相当于说：“hi，把数据放到 key 的队列中“
+
+![image-20220219155856948](../AppData/Roaming/Typora/typora-user-images/image-20220219155856948.png)
+
+如上图所示，Broker 定义了三个队列，key1，key2，key3，生产者发送数据的时候会发送key1 和 data，Broker 在推送数据的时候则推送 data（也可能把 key 带上）。
+
+虽然架构一样但是 kafka 的性能要比 jms 的性能不知道高到多少倍，所以基本这种类型的MQ 只有 kafka 一种备选方案。如果你需要一条暴力的数据流（在乎性能而非灵活性）那么kafka 是最好的选择
+
+> Kafka RocketMQ
+
+### 1.4 轻Topic
+
+这种的代表是 RabbitMQ（或者说是 AMQP）。生产者发送 key 和数据，消费者定义订阅的队列，Broker 收到数据之后会通过一定的逻辑计算出 key 对应的队列，然后把数据交给队列
+
+![image-20220219160203756](../AppData/Roaming/Typora/typora-user-images/image-20220219160203756.png)
+
+这种模式下解耦了 key 和 queue，在这种架构中 queue 是非常轻量级的（在 RabbitMQ 中它的上限取决于你的内存），消费者关心的只是自己的 queue；生产者不必关心数据最终给谁只要指定 key 就行了，中间的那层映射在 AMQP 中叫 **exchange**（交换机）。
+
+AMQP 中有四种 exchange
+
+- Direct exchange：key 就等于 queue
+- Fanout exchange：无视 key，给所有的 queue 都来一份
+- Topic exchange：key 可以用“宽字符”模糊匹配 queue
+- Headers exchange：无视 key，通过查看消息的头部元数据来决定发给那个
+- queue（AMQP 头部元数据非常丰富而且可以自定义）
+
+这种结构的架构给通讯带来了很大的灵活性，我们能想到的通讯方式都可以用这四种exchange 表达出来。如果你需要一个企业数据总线（在乎灵活性）那么 RabbitMQ 绝对的值得一用
+
+## 1.3 无Broker的MQ
+
+无 Broker 的 MQ 的代表是 ZeroMQ。该作者非常睿智，他非常敏锐的意识到——**MQ 是更高级的 Socket**，它是解决通讯问题的。所以 ZeroMQ 被设计成了一个“库”而不是一个中间件，这种实现也可以达到—>没有 Broker 的目的
+
+![image-20220219161253608](../AppData/Roaming/Typora/typora-user-images/image-20220219161253608.png)
+
+节点之间通讯的消息都是发送到彼此的队列中，每个节点都既是生产者又是消费者。ZeroMQ做的事情就是封装出一套**类似于 Socket 的 API 可以完成发送数据，读取数据**
+
+ZeroMQ 其实就是一个跨语言的、重量级的 Actor 模型邮箱库。你可以把自己的程序想象成一个 Actor，ZeroMQ 就是提供邮箱功能的库；ZeroMQ 可以实现同一台机器的 RPC 通讯也可以实现不同机器的 TCP、UDP 通讯，如果你需要一个强大的、灵活、野蛮的通讯能力，别犹豫 ZeroMQ
+
+# 02 Kafka专题
+
+Kafka是最初由Linkedin公司开发，是一个分布式、支持分区的（partition）、多副本的 （replica），基于zookeeper协调的分布式消息系统，它的最大的特性就是可以实时的处理 大量数据以满足各种需求场景：比如基于hadoop的批处理系统、低延迟的实时系统、 Storm/Spark流式处理引擎，web/nginx日志、访问日志，消息服务等等，用scala语言编 写，Linkedin于 2010 年贡献给了Apache基金会并成为顶级开源 项目。
+
+## 2.1 kafka基础概念
+
+### 2.2.1 Kafka的使用场景
+
+日志收集：一个公司可以用Kafka收集各种服务的log，通过kafka以统一接口服务的方式 开放给各种consumer，例如hadoop、Hbase、Solr等。
+
+ 消息系统：解耦和生产者和消费者、缓存消息等。
+
+ 用户活动跟踪：Kafka经常被用来记录web用户或者app用户的各种活动，如浏览网⻚、 搜索、点击等活动，这些活动信息被各个服务器发布到kafka的topic中，然后订阅者通过 订阅这些topic来做实时的监控分析，或者装载到hadoop、数据仓库中做离线分析和挖 掘。 
+
+运营指标：Kafka也经常用来记录运营监控数据。包括收集各种分布式应用的数据，生产 各种操作的集中反馈，比如报警和报告。
+
+### 2.2.2 Kafka基本概念
+
+kafka是一个分布式的，分区的消息(官方称之为commit log)服务。它提供一个消息系统应该 具备的功能，但是确有着独特的设计。可以这样来说，Kafka借鉴了JMS规范的思想，但是确 并 `没有完全遵循JMS规范。`
+
+首先，让我们来看一下基础的消息(Message)相关术语：
+
+| 名称          | 解释                                                         |
+| ------------- | ------------------------------------------------------------ |
+| Broker        | 消息中间件处理节点，⼀个Kafka节点就是⼀个broker，⼀个或者多个Broker可以组成⼀个Kafka集群 |
+| Topic         | Kafka根据topic对消息进⾏归类，发布到Kafka集群的每条消息都需要指定⼀个topic |
+| Producer      | 消息⽣产者，向Broker发送消息的客户端                         |
+| Consumer      | 消息消费者，从Broker读取消息的客户端                         |
+| ConsumerGroup | 每个Consumer属于⼀个特定的Consumer Group，⼀条消息可以被多个不同的Consumer Group消费，但是⼀个Consumer Group中只能有⼀个Consumer能够消费该消息 |
+| Partition     | 物理上的概念，⼀个topic可以分为多个partition，每个partition内部消息是有序的 |
+
+首先，让我们来看一下基础的消息(Message)相关术语：
+
+| 名称          | 解释                                                         |
+| ------------- | ------------------------------------------------------------ |
+| Broker        | 消息中间件处理节点，⼀个Kafka节点就是⼀个broker，⼀个或者多个Broker可以组成⼀个Kafka集群 |
+| Topic         | Kafka根据topic对消息进⾏归类，发布到Kafka集群的每条消息都需要指定⼀个topic |
+| Producer      | 消息⽣产者，向Broker发送消息的客户端                         |
+| Consumer      | 消息消费者，从Broker读取消息的客户端                         |
+| ConsumerGroup | 每个Consumer属于⼀个特定的Consumer Group，⼀条消息可以被多个不同的Consumer Group消费，但是⼀个Consumer Group中只能有⼀个Consumer能够消费该消息 |
+| Partition     | 物理上的概念，⼀个topic可以分为多个partition，每个partition内部消息是有序的 |
+
+因此，从一个较高的层面上来看，producer通过网络发送消息到Kafka集群，然后consumer 来进行消费，如下图
+
+![image-20220220124637255](../AppData/Roaming/Typora/typora-user-images/image-20220220124637255.png)
+
+服务端(brokers)和客户端(producer、consumer)之间通信通过 **TCP协议** 来完成。
+
+## 2.2 kafka基本使用
+
+### 2.2.1 安装前的环境准备
+
+- 安装jdk
+- 安装zk
+- 官网下载kafka的压缩包:http://kafka.apache.org/downloads
+- 解压缩至如下路径
+
+```
+/usr/local/kafka/
+```
+
+* 修改配置文件：/usr/local/kafka/kafka2.11-2.4/config/server.properties
+
+```
+#broker.id属性在kafka集群中必须要是唯一
+broker.id= 0
+#kafka部署的机器ip和提供服务的端口号
+listeners=PLAINTEXT://192.168.65.60:9092
+#kafka的消息存储文件
+log.dir=/usr/local/data/kafka-logs
+#kafka连接zookeeper的地址
+zookeeper.connect= 192.168.65.60:2181
+```
+
+### 2.2.2 启动kafka服务器
+
+进入到bin目录下。使用命令来启动
+
+```
+./kafka-server-start.sh -daemon../config/server.properties
+```
+
+验证是否启动成功：
+
+进入到zk中的节点看id是 0 的broker有没有存在（上线）
+
+```
+ls /brokers/ids/
+```
+
+**server.properties核心配置详解：**
+
+| Property                   | Default                        | Description                                                  |
+| -------------------------- | ------------------------------ | ------------------------------------------------------------ |
+| broker.id                  | 0                              | 每个broker都可以⽤⼀个唯⼀的⾮负整数id进⾏标识；这个id可以作为broker的“名字”，你可以选择任意你喜欢的数字作为id，只要id是唯⼀的即可。 |
+| log.dirs                   | /tmp/kafka-logs                | kafka存放数据的路径。这个路径并不是唯⼀的，可以是多个，路径之间只需要使⽤逗号分隔即可；每当创建新partition时，都会选择在包含最少partitions的路径下进⾏。 |
+| listeners                  | PLAINTEXT://192.168.65.60:9092 | server接受客户端连接的端⼝，ip配置kafka本机ip即可            |
+| zookeeper.connect          | localhost:2181                 | zooKeeper连接字符串的格式为：hostname:port，此处hostname和port分别是ZooKeeper集群中某个节点的host和port；zookeeper如果是集群，连接⽅式为hostname1:port1, hostname2:port2,hostname3:port3 |
+| log.retention.hours        | 168                            | 每个⽇志⽂件删除之前保存的时间。默认数据保存时间对所有topic都⼀样。 |
+| num.partitions             | 1                              | 创建topic的默认分区数                                        |
+| default.replication.factor | 1                              | ⾃动创建topic的默认副本数量，建议设置为⼤于等于2             |
+| min.insync.replicas        | 1                              | 当producer设置acks为-1时，min.insync.replicas指定replicas的最⼩数⽬（必须确认每⼀个repica的写数据都是成功的），如果这个数⽬没有达到，producer发送消息会产⽣异常 |
+| delete.topic.enable        | false                          | 是否允许删除主题                                             |
+
+### 2.2.3 创建主题topic
+
+> topic是什么概念？topic可以实现消息的分类，不同消费者订阅不同的topic。
+
+![image-20220220124955260](../AppData/Roaming/Typora/typora-user-images/image-20220220124955260.png)
+
+执行以下命令创建名为“test”的topic，这个topic只有一个partition，并且备份因子也设置为1
+
+```shell
+./kafka-topics.sh --create --zookeeper 172.16.253.35:2181 --replication-factor 1 --partitions 1 --topic test
+```
+
+查看当前kafka内有哪些topic
+
+```shell
+./kafka-topics.sh --list --zookeeper 172.16.253.35:2181
+```
+
+### 2.2.4 发送消息
+
+> kafka自带了一个producer命令客户端，可以从本地文件中读取内容，或者我们也可以以命令行中直接输入内容，并将这些内容以消息的形式发送到kafka集群中。在默认情况下，每一个行会被当做成一个独立的消息。使用kafka的发送消息的客户端，指定发送到的kafka服务器地址和topic
+
+```shell
+./kafka-console-producer.sh --broker-list 172.16.253.38:9092 --topic test
+```
+
+### 2.2.5 消费消息
+
+对于consumer，kafka同样也携带了一个命令行客户端，会将获取到内容在命令中进行输 出， **默认是消费最新的消息** 。使用kafka的消费者消息的客户端，从指定kafka服务器的指定 topic中消费消息
+
+方式一：从最后一条消息的偏移量+1开始消费
+
+```shell
+./kafka-console-consumer.sh --bootstrap-server 172.16.253.38:9092 --topic test
+```
+
+方式二：从头开始消费
+
+```shell
+./kafka-console-consumer.sh --bootstrap-server 172.16.253.38:9092 --from-beginning --topic test
+```
+
+### 2.2.6 几个注意点
+
+- 消息会被存储
+- 消息是顺序存储
+- 消息是有偏移量的
+- 消费时可以指明偏移量进行消费
+
+## 2.3 kafka中的相关细节
+
+### 2.3.1 消息的顺序存储
+
+消息的发送方会把消息发送到broker中，broker会存储消息，消息是按照发送的顺序进行存储。因此消费者在消费消息时可以指明主题中消息的偏移量。默认情况下，是从最后一个消息的下一个偏移量开始消费。
+
+### 2.3.2 单播消息的实现
+
+单播消息：一个消费组里 只会有一个消费者能消费到某一个topic中的消息。于是可以创建多个消费者，这些消费者在同一个消费组中。
+
+```shell
+./kafka-console-consumer.sh --bootstrap-server 10.31.167.10:9092 --consumer-property group.id=testGroup --topic test
+```
+
+### 2.3.3 多播消息的实现
+
+### 在一些业务场景中需要让一条消息被多个消费者消费，那么就可以使用多播模式。
+
+kafka实现多播，只需要让不同的消费者处于不同的消费组即可。
+
+```shell
+./kafka-console-consumer.sh --bootstrap-server 10.31.167.10:9092 --consumer-property group.id=testGroup1 --topic test
+
+./kafka-console-consumer.sh --bootstrap-server 10.31.167.10:9092 --consumer-property group.id=testGroup2 --topic test
+```
+
+
+
+### 2.3.4 查看消费组及信息
+
+```shell
+# 查看当前主题下有哪些消费组
+./kafka-consumer-groups.sh --bootstrap-server 10.31.167.10:9092 --list
+# 查看消费组中的具体信息：比如当前偏移量、最后一条消息的偏移量、堆积的消息数量
+./kafka-consumer-groups.sh --bootstrap-server 172.16.253.38:9092 --describe --group testGroup
+```
+
+![image-20220220125828505](../AppData/Roaming/Typora/typora-user-images/image-20220220125828505.png)
+
+* Current-offset:当前消费组的已消费偏移量
+* Log-end-offset: 主题对应分区消息的结束偏移量(HW)
+* Lag: 当前消费组未消费的消息数
+
+## 2.4 主题、分区的概念
+
+### 2.4.1 主题Topic
+
+可以理解成是一个类别的名称
+
+### 2.4.2 partion分区
+
+![image-20220220125943492](../AppData/Roaming/Typora/typora-user-images/image-20220220125943492.png)
+
+一个主题中的消息量是非常大的，因此可以通过分区的设置，来分布式存储这些消息。比如一个topic创建了 3 个分区。那么topic中的消息就会分别存放在这三个分区中。
+
+#### 为一个主题创建多个分区
+
+```
+./kafka-topics.sh --create --zookeeper localhost:2181 --partitions 2 --topic test1
+```
+
+可以通过这样的命令查看topic的分区信息
+
+```
+./kafka-topics.sh --describe --zookeeper localhost:2181 --topic test1
+```
+
+#### 分区的作用
+
+- 可以分布式存储
+- 可以并行写
+
+实际上是存在data/kafka-logs/test-0 和 test-1中的0000000.log文件中
+
+小细节：
+
+定期将自己消费分区的offset提交给kafka内部topic：__consumer_offsets，提交过去的 时候，key是consumerGroupId+topic+分区号，value就是当前offset的值，kafka会定 期清理topic里的消息，最后就保留最新的那条数据 因为__consumer_offsets可能会接收高并发的请求，kafka默认给其分配 50 个分区(可以 通过offsets.topic.num.partitions设置)，这样可以通过加机器的方式抗大并发。 通过如下公式可以选出consumer消费的offset要提交到__consumer_offsets的哪个分区 公式：hash(consumerGroupId) % __consumer_offsets主题的分区数
+
+## 2.5 kafka 集群及副本的概念
+
+### 2.5.1 搭建kafka集群，3个broker
+
+准备 3 个server.properties文件
+
+每个文件中的这些内容要调整
+
+* server.properties
+
+```
+broker.id= 0
+listeners=PLAINTEXT://192.168.65.60:
+log.dir=/usr/local/data/kafka-logs
+```
+
+* server1.properties
+
+```
+broker.id= 1
+listeners=PLAINTEXT://192.168.65.60:
+log.dir=/usr/local/data/kafka-logs
+```
+
+* server2.properties
+
+```
+broker.id= 2
+listeners=PLAINTEXT://192.168.65.60:
+log.dir=/usr/local/data/kafka-logs-
+```
+
+使用如下命令来启动3台服务器
+
+```
+./kafka-server-start.sh -daemon../config/server0.properties
+./kafka-server-start.sh -daemon../config/server1.properties
+./kafka-server-start.sh -daemon../config/server2.properties
+```
+
+搭建完后通过查看zk中的/brokers/ids 看是否启动成功
+
+### 2.5.2 副本的概念
+
+副本是对分区的备份。在集群中，不同的副本会被部署在不同的broker上。下面例子：创建 1个主题， 2 个分区、 3 个副本。
+
+```
+./kafka-topics.sh --create --zookeeper 172.16.253.35:2181 --replication-factor 3 --partitions 2 --topic my-replicated-topic
+```
+
+![image-20220220131414695](../AppData/Roaming/Typora/typora-user-images/image-20220220131414695.png)
+
+![image-20220220131425895](../AppData/Roaming/Typora/typora-user-images/image-20220220131425895.png)
+
+通过查看主题信息，其中的关键数据：
+
+- replicas：当前副本存在的broker节点
+- leader：副本里的概念
+  - 每个partition都有一个broker作为leader。
+  - 消息发送方要把消息发给哪个broker？就看副本的leader是在哪个broker上面。副本里的leader专⻔用来接收消息。
+  - 接收到消息，其他follower通过poll的方式来同步数据。
+- follower：leader处理所有针对这个partition的读写请求，而follower被动复制leader，不提供读写（主要是为了保证多副本数据与消费的一致性），如果leader所在的broker挂掉，那么就会进行新leader的选举，至于怎么选，在之后的controller的概念中介绍。
+
+通过kill掉leader后再查看主题情况
+
+```
+# kill掉leader
+ps -aux | grep server.properties
+kill 17631
+# 查看topic情况
+./kafka-topics.sh --describe --zookeeper 172.16.253.35:2181 --topic my-replicated-topic
+```
+
+isr： 可以同步的broker节点和已同步的broker节点，存放在isr集合中。
+
+### 2.5.3 broker、主题、分区、副本
+
+- kafka集群中由多个broker组成
+- 一个broker中存放一个topic的不同partition——副本
+
+### 2.5.4 kakfa集群消息的发送
+
+```
+./kafka-console-producer.sh --broker-list 172.16.253.38:9092,172.16.253.38:9093,172.16.253.38:9094 --topic my-replicated-topic
+```
+
+### 2.5.5 kafka集群消息的消费
+
+```
+./kafka-console-consumer.sh --bootstrap-server 172.16.253.38:9092,172.16.253.38:9093,172.16.253.38:9094 --from-beginning --topic my-replicated-topic
+```
+
+### 2.5.6 关于分区消费组消费者的细节
+
+![image-20220220131703178](../AppData/Roaming/Typora/typora-user-images/image-20220220131703178.png)
+
+图中Kafka集群有两个broker，每个broker中有多个partition。**一个partition只能被一个消费组里的某一个消费者消费，从而保证消费顺序**。Kafka只在partition的范围内保证消息消费的局部顺序性，不能在同一个topic中的多个partition中保证总的消费顺序性。一个消费者可以消费多个partition。
+
+> 消费组中消费者的数量不能比一个topic中的partition数量多，否则多出来的消费者消费不到消息。
+
+# 03 Kafka API -生产者
+
+## 3.1 引入依赖
+
+```xml
+<dependency>
+    <groupId>org.apache.kafka</groupId>
+    <artifactId>kafka-clients</artifactId>
+    <version>2.4.1</version>
+</dependency>
+```
+
+## 3.2 生产者发送消息的基本实现
+
+```java
+#### //消息的发送方
+public class MyProducer {
+
+private final static String TOPIC_NAME = "my-replicated-topic";
+
+public static void main(String[] args) throws ExecutionException,InterruptedException {
+    Properties props = new Properties();
+    props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG,"10.31.167.10:9092,10.31.167.10:9093,10.31.167.10:9094");
+    //把发送的key从字符串序列化为字节数组
+    props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,StringSerializer.class.getName());
+    //把发送消息value从字符串序列化为字节数组
+    props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG,StringSerializer.class.getName());
+    
+    Producer<String, String> producer = new KafkaProducer<String,String>(props);
+
+    Order order = new Order((long) i, i);
+    ProducerRecord<String, String> producerRecord = new ProducerRecord<String, String>(TOPIC_NAME,      		   order.getOrderId().toString(), JSON.toJSONString(order));
+    RecordMetadata metadata = producer.send(producerRecord).get();
+    //=====阻塞=======
+    System.out.println("同步方式发送消息结果：" + "topic-" +metadata.topic() + "|partition-"+ metadata.partition() + "|offset-" +metadata.offset());
+```
+
+## 3.2 发送消息到指定分区上
+
+```java
+ProducerRecord<String, String> producerRecord = new ProducerRecord<String, String>(TOPIC_NAME, 0 , order.getOrderId().toString(), JSON.toJSONString(order));
+```
+
+## 3.4 未指定分区，则会通过业务key的hash运算，算出消息往哪个分区上发
+
+```java
+//未指定发送分区，具体发送的分区计算公式：hash(key)%partitionNum
+ProducerRecord<String, String> producerRecord = new ProducerRecord<String, String>(TOPIC_NAME, order.getOrderId().toString(), JSON.toJSONString(order));
+```
+
+## 3.5 同步发送
+
+生产者同步发消息，在收到kafka的ack告知发送成功之前一直处于阻塞状态
+
+```java
+//等待消息发送成功的同步阻塞方法
+RecordMetadata metadata = producer.send(producerRecord).get();
+System.out.println("同步方式发送消息结果：" + "topic-" +metadata.topic() + "|partition-"+ metadata.partition() + "|offset-" +metadata.offset());
+```
+
+![image-20220220221859308](../AppData/Roaming/Typora/typora-user-images/image-20220220221859308.png)
+
+## 3.6 异步发消息
+
+**生产者发消息，发送完后不用等待broker给回复，直接执行下面的业务逻辑。可以提供callback，让broker异步的调用callback，告知生产者，消息发送的结果**
+
+```java
+//要发送 5 条消息
+Order order = new Order((long) i, i);
+//指定发送分区
+ProducerRecord<String, String> producerRecord = new ProducerRecord<String, String>(TOPIC_NAME, 0 , order.getOrderId().toString(),JSON.toJSONString(order));
+//异步回调方式发送消息
+producer.send(producerRecord, new Callback() {
+public void onCompletion(RecordMetadata metadata, Exception exception) {
+if (exception != null) {
+    System.err.println("发送消息失败：" +
+    exception.getStackTrace());
+}
+if (metadata != null) {
+System.out.println("异步方式发送消息结果：" + "topic-" +metadata.topic() + "|partition-"+ metadata.partition() + "|offset-" + metadata.offset());
+         }
+    }
+});
+```
+
+## 3.7 关于生产者的ack参数配置
+
+在同步发消息的场景下：生产者发动broker上后，ack会有 3 种不同的选择
+
+- （ 1 ）acks=0： 表示producer不需要等待任何broker确认收到消息的回复，就可以继续发送下一条消息。性能最高，但是最容易丢消息。
+- （ 2 ）acks=1： 至少要等待leader已经成功将数据写入本地log，但是不需要等待所有follower是否成功写入。就可以继续发送下一条消息。这种情况下，如果follower没有成功备份数据，而此时leader又挂掉，则消息会丢失。
+- （ 3 ）acks=-1或all： 需要等待 min.insync.replicas(默认为 1 ，推荐配置大于等于2) 这个参数配置的副本个数都成功写入日志，这种策略会保证只要有一个备份存活就不会丢失数据。这是最强的数据保证。一般除非是金融级别，或跟钱打交道的场景才会使用这种配置。
+
+**code**
+
+```
+props.put(ProducerConfig.ACKS_CONFIG, "1");
+```
+
+## 3.8 其他的一些细节
+
+- 发送会默认会重试 3 次，每次间隔100ms
+- 发送的消息会先进入到本地缓冲区（32mb），kakfa会跑一个线程，该线程去缓冲区中取16k的数据，发送到kafka，如果到 10 毫秒数据没取满16k，也会发送一次。
+
+# 04 消费者
+
+## 4.1 消费者消费消息的基本实现
+
+```java
+public class MyConsumer {
+private final static String TOPIC_NAME = "my-replicated-topic";
+private final static String CONSUMER_GROUP_NAME = "testGroup";
+
+public static void main(String[] args) {
+Properties props = new Properties();
+props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG,"10.31.167.10:9092,10.31.167.10:9093,10.31.167.10:9094");
+// 消费分组名
+props.put(ConsumerConfig.GROUP_ID_CONFIG, CONSUMER_GROUP_NAME);
+props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG,StringDeserializer.class.getName());
+props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG,StringDeserializer.class.getName());
+//创建一个消费者的客户端
+KafkaConsumer<String, String> consumer = new KafkaConsumer<String,String>(props);
+// 消费者订阅主题列表
+consumer.subscribe(Arrays.asList(TOPIC_NAME));
+
+while (true) {
+/*
+* poll() API 是拉取消息的⻓轮询
+*/
+ConsumerRecords<String, String> records =consumer.poll(Duration.ofMillis( 1000 ));
+for (ConsumerRecord<String, String> record : records) {
+System.out.printf("收到消息：partition = %d,offset = %d, key =%s, value = %s%n", record.partition(),record.offset(), record.key(), record.value());
+            }
+        }
+    }
+}
+```
+
+## 4.2 自动提交offset
+
+- 设置自动提交参数 - 默认
+
+```java
+// 是否自动提交offset，默认就是true
+props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "true");
+// 自动提交offset的间隔时间
+props.put(ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG, "1000");Copy to clipboardErrorCopied
+```
+
+消费者poll到消息后默认情况下，会自动向broker的_consumer_offsets主题提交当前主题-分区消费的偏移量。
+
+自动提交会丢消息： 因为如果消费者还没消费完poll下来的消息就自动提交了偏移量，那么此 时消费者挂了，于是下一个消费者会从已提交的offset的下一个位置开始消费消息。之前未被消费的消息就丢失掉了。
+
+## 4.3 手动提交offset
+
+- 设置手动提交参数
+
+```java
+props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
+```
+
+
+
+# Note
+
+## 1 为什么需要使用消息队列？
+
+### 1.1 使用同步的通信方式来解决多个服务之间的通信
+
+![image-20220219154215799](../AppData/Roaming/Typora/typora-user-images/image-20220219154215799.png)
+
+正常的单体下订单流程，业务之间同步消耗时间比较久
+
+同步的方式存在的问题：
+
+* **造成系统的开销-响应的时间比较大的 2-5s**,如果是微服务，服务之间的通信造成的时间如果是500ms,4次通信就是2秒
+
+* **同步的时候遇到网络经常抖动的时候，中间的某个步骤出现了问题，程序无法执行接下来的服务，会影响到下订单**
+
+  (同步的过程中要保证每个服务都顺利执行完的成功完，整个链路才执行完，因为网络等其他问题，整个链路成功执行完的成功率会受影响-导致用户体验较差)
+
+同步的通信方式会存在性能和稳定性的问题
+
+### 1.2 使用异步的通信方式
+
+业务的上下游加入一个**通信模块**(消息队列)
+
+![image-20220219155444239](../AppData/Roaming/Typora/typora-user-images/image-20220219155444239.png)
+
+异步的优势：
+
+* **明显提升系统的吞吐量**
+* **即使有服务失败，也可以通过分布式事务解决方案来保证最终是成功的**
+
+针对于同步的通信方式来说，异步的方式，可以让上有快速成功，极大提高了系统的吞吐量。而且在分布式系统中，通过下游多个服务的分布式事务的保障，也能保证业务执行之后的最终一致性。
+
+消息队列解决具体的是什么问题：**通信问题**
+
+
+
+## 2 消息队列的流派
+
+> Broker 内部消息的转发 就是broker干的事情
+
+目前消息队列的中间件选型有很多种：
+
+* rabbitMQ
+* rocketMQ：阿里内部有一个大神，根据kafka的内部执行原理，手写的一个消息队列中间件。性能是与Kadka相比肩，除此之外，在功能上封装了更多的功能。
+* kafka：全球消息处理性能最快的一款MQ
+* zeroMQ
+
+这些消息队列中间件有什么区别？
+
+### 1.有broker
+
+* 重topic：Kafka、RocketMQ
+
+  整个broker,依据topic来进行消息的中转。在重topic的消息队列里必然需要topic的存在
+
+* 轻topic
+
+  topic只是一种中转模式
+
+### 2.无broker
+
+在生产者和消费者之间没有使用broker,例如zeroMQ,直接使用socket进行通信
+
+# kafka与zookeeper版本对应关系
+
+| kafka版本            | zookeeper版本            | springboot版本      |
+| -------------------- | ------------------------ | ------------------- |
+| kafka_2.12-2.4.0     | zookeeper-3.5.6.jar      | zookeeper-3.5.6.jar |
+| kafka_2.12-2.3.1     | zookeeper-3.4.14.jar     | springboot2.2.2     |
+| kafka_**2.12-2.3.0** | **zookeeper-3.4.14.jar** | springboot2.2.2     |
+| kafka_2.12-1.1.1     | zookeeper-3.4.10.jar     |                     |
+| kafka_2.12-1.1.0     | zookeeper-3.4.10.jar     |                     |
+| kafka_2.12-1.0.2     | zookeeper-3.4.10.jar     |                     |
+| kafka_2.12-1.0.0     | zookeeper-3.4.10.jar     |                     |
+| kafka_2.12-0.11.0.0  | zookeeper-3.4.10.jar     |                     |
+| kafka_2.12-0.10.2.2  | zookeeper-3.4.9.jar      |                     |
+| kafka_2.11-0.10.0.0  | zookeeper-3.4.6.jar      |                     |
+| kafka_2.11-0.9.0.0   | zookeeper-3.4.6.jar      |                     |
+
+springboot与[kafka](https://so.csdn.net/so/search?q=kafka&spm=1001.2101.3001.7020)版本对应页面: https://spring.io/projects/spring-kafka
+
+kafka下载地址：http://kafka.apache.org/downloads
+
+# zookeeper 集群安装
+
+```
+01 tar -zxvf ....tar.gz 注意不是tar未编译版本
+02 根目录创建zkCluster/zk1/data 与 zkCluster/zk1/dataLog
+	创建三个 还有 zk2 zk3
+   在zkCluster/zk1/data在中touch一个文件myid
+   echo "1" >> zkCluster/zk1/data/myid
+   echo "2" >> zkCluster/zk2/data/myid
+   echo "3" >> zkCluster/zk3/data/myid
+   
+03  conf/zoo1.cfg conf/zoo2.cfg conf/zoo3.cfg 
+clientPort=2181
+
+server.1=192.168.0.33:2001:3001
+server.2=192.168.0.33:2002:3002
+server.3=192.168.0.33:2003:3003
+
+04 bin目录下启动
+ sh zkServer.sh start ../conf/zoo1.cfg
+ sh zkServer.sh start ../conf/zoo2.cfg
+ sh zkServer.sh start ../conf/zoo3.cfg
+```
+
+# kafka安装
+
+```
+01 conf/ 根据server.properties 复制server01.properties
+
+[server00.properties]
+broker.id= 0
+listeners=PLAINTEXT://192.168.64.12:9092
+zookeeper.connect=192.168.64.12:2181,192.168.64.12:2182,192.168.64.12:2183
+log.dirs=/usr/kafka_2.11-2.3.0/cluster/00/logs
+
+[server01.properties]
+broker.id= 1
+listeners=PLAINTEXT://192.168.64.12:9093
+zookeeper.connect=192.168.64.12:2181,192.168.64.12:2182,192.168.64.12:2183
+log.dirs=/usr/kafka_2.11-2.3.0/cluster/01/logs
+
+[server02.properties]
+broker.id= 2
+listeners=PLAINTEXT://192.168.64.12:9094
+zookeeper.connect=192.168.64.12:2181,192.168.64.12:2182,192.168.64.12:2183
+log.dirs=/usr/kafka_2.11-2.3.0/cluster/02/logs
+
+02 创建根目录下结构
+	[root]
+	   |- cluster
+	   		|- 00 
+	   			|- logs
+	   		|- 01
+            	|- logs
+            |- 02
+            	|- logs
+```
+
+
+
+```
+03 启动kafka集群
+[bin] > sh kafka-server-start.sh -daemon ../config/server00.properties
+	    sh kafka-server-start.sh -daemon ../config/server01.properties
+        sh kafka-server-start.sh -daemon ../config/server02.properties
+
+04 控制台查看是否启动成功
+[bin] > sh kafka-console-consumer.sh --bootstrap-server 192.168.64.12:9092 --topic kafka-topic
+
+如果正常的话，则应该不会有任何输出信息
+如果不正常，可查看详细日志文件：
+tail -fn 100 logs/server.log
+___
+[校验kafka是否启动成功]
+进入zk内查看是否有kafka的节点 /brokers/ids/0
+	> sh /usr/zookeeper-3.4.14/bin/zkCli.sh
+	> ls /brokers/ids/0
+	> quit
+
+05 停用
+sh kafka-server-stop.sh ../config/server00.properties
+sh kafka-server-stop.sh ../config/server01.properties
+sh kafka-server-stop.sh ../config/server02.properties
+
+```
+
+# kafka 命令
+
+## 创建 topic
+
+```
+06 创建主题topics
+
+sh /usr/kafka_2.11-2.3.0/bin/kafka-topics.sh
+	--create 
+	--zookeeper 192.168.64.12:2181 
+	--replication-factor 1 //副本
+	--partitions 1 //分区
+	--topic test
+[
+sh /usr/kafka_2.11-2.3.0/bin/kafka-topics.sh --create --zookeeper 192.168.64.12:2181 --replication-factor 1 --partitions 1 --topic test
+]
+结果> Created topic test
+```
+
+
+
+```
+07 查看当前kafka内有哪些topic
+sh /usr/kafka_2.11-2.3.0/bin/kafka-topics.sh
+	--list
+	--zookeeper 192.168.64.12:2181 
+[
+sh /usr/kafka_2.11-2.3.0/bin/kafka-topics.sh --list --zookeeper 192.168.64.12:2181
+]
+结果> kafka-topic
+	 _consumer_offsets
+	 test
+```
+
+## 发送消息与消费消息
+
+```
+08 发送消息
+sh /usr/kafka_2.11-2.3.0/bin/kafka-console-producer.sh
+	--broker-list 192.168.64.12:9092
+	--topic test
+[
+sh /usr/kafka_2.11-2.3.0/bin/kafka-console-producer.sh --broker-list 192.168.64.12:9092 --topic test
+]
+会打开客户端
+> first message
+> second message (偏移量所在地,此时消费者已经启用)
+> new one message
+```
+
+
+
+```
+09 消费消息
+(方式一：从最后一条消息的偏移量+1开始消费)
+sh /usr/kafka_2.11-2.3.0/bin/kafka-topics.sh
+	--bootstrap-server 192.168.64.12:9092 
+	--topic test
+[
+sh /usr/kafka_2.11-2.3.0/bin/kafka-console-consumer.sh --bootstrap-server 192.168.64.12:9092 --topic test
+]
+
+结果
+> new one message 
+```
+
+
+
+```
+(方式二：从头开始消费)
+sh /usr/kafka_2.11-2.3.0/bin/kafka-console-consumer.sh 
+  --bootstrap-server 192.168.64.12:9092 
+  --from-beginning //从头开始消费
+  --topic test
+[
+sh /usr/kafka_2.11-2.3.0/bin/kafka-console-consumer.sh --bootstrap-server 192.168.64.12:9092 --from-beginning --topic test
+]
+
+结果
+> first message
+> second message
+> new one message
+```
+
+### 注意点
+
+- 消息会被存储
+- 消息是顺序存储
+- 消息是有偏移量的
+- 消费时可以指明偏移量进行消费
+
+## 单播消息和多播消息
+
+> 1.sh /usr/kafka_2.11-2.3.0/bin/kafka-topics.sh --create --zookeeper 192.168.64.12:2181 --replication-factor 1 --partitions 1 --topic grouptest
+>
+> 2.sh /usr/kafka_2.11-2.3.0/bin/kafka-console-producer.sh --broker-list 192.168.64.12:9092 --topic grouptest
+
+单播消息：消费组中的多个消费者不能同时消费一个topic
+
+```
+sh /usr/kafka_2.11-2.3.0/bin/kafka-console-consumer.sh 
+  --bootstrap-server 192.168.64.12.10:9092 
+  --consumer-property group.id=testGroup //消费属性中定义消费组ID
+  --topic grouptest
+[
+sh /usr/kafka_2.11-2.3.0/bin/kafka-console-consumer.sh --bootstrap-server 192.168.64.12:9092 --consumer-property group.id=testGroup --topic grouptest
+]  
+```
+
+> 引入：既然一个消费组不能消费同一个消息，但仍要满足一个topic被多个消费者消费，就是将两个消费者塞入不同的消费组中
+
+多播消息：一个topic中的消息能够被**不同的消费组**中的两个消费者所消费
+
+```
+sh /usr/kafka_2.11-2.3.0/bin/kafka-console-consumer.sh 
+  --bootstrap-server 192.168.64.12:9092 
+  --consumer-property group.id=testGroup1 //消费属性中定义消费组ID
+  --topic grouptest
+[
+sh /usr/kafka_2.11-2.3.0/bin/kafka-console-consumer.sh --bootstrap-server 192.168.64.12:9092 --consumer-property group.id=testGroup1 --topic grouptest 
+]  
+
+同理
+[
+sh /usr/kafka_2.11-2.3.0/bin/kafka-console-consumer.sh --bootstrap-server 192.168.64.12:9092 --consumer-property group.id=testGroup2 --topic grouptest 
+]  
+```
+
+查看消费组及信息
+
+```
+查看消费组及信息
+sh /usr/kafka_2.11-2.3.0/bin/kafka-consumer-groups.sh 
+	--bootstrap-server 10.31.167.10:9092 
+	--list
+	
+[
+sh /usr/kafka_2.11-2.3.0/bin/kafka-consumer-groups.sh --bootstrap-server 192.168.64.12:9092 --list
+]
+
+结果>
+testGroup2
+testGroup1
+testGroup
+```
+
+```
+查看消费组中的具体信息：
+比如当前偏移量、最后一条消息的偏移量、堆积的消息数据
+sh /usr/kafka_2.11-2.3.0/bin/kafka-consumer-groups.sh
+	--bootstrap-server 192.168.64.12:9092
+	--describe
+	--group testGroup
+
+[
+sh /usr/kafka_2.11-2.3.0/bin/kafka-consumer-groups.sh --bootstrap-server 192.168.64.12:9092 --describe --group testGroup
+]
+
+结果：
+
+GROUP(testGroup)TOPIC(grouptest)PARTITION(0)CURRENT-OFFSET(16)LOG-END-OFFSET(18)LAG(2)CONSUMER-ID(-)HOST(-)CLIENT-ID(-)
+```
+
+- Currennt-offset: 当前消费组的已消费偏移量
+- Log-end-offset: 主题对应分区消息的结束偏移量(HW)
+- Lag: 当前消费组未消费的消息数
+
+## 创建分区
+
+```
+# 创建一个分区为2、名为test1的topic
+sh /usr/kafka_2.11-2.3.0/bin/kafka-topics.sh 
+	--create 
+	--zookeeper 192.168.64.12:2181 
+	--replication-factor 1
+	--partitions 2 //分区
+	--topic test1
+[
+sh /usr/kafka_2.11-2.3.0/bin/kafka-topics.sh --create --zookeeper 192.168.64.12:2181 --replication-factor 1 --partitions 2 --topic test1
+]
+
+# 查询topic分区的信息
+sh /usr/kafka_2.11-2.3.0/bin/kafka-topics.sh 
+	--describe
+	--zookeeper 192.168.64.12:2181 
+	--topic test1
+[
+sh /usr/kafka_2.11-2.3.0/bin/kafka-topics.sh --describe --zookeeper 192.168.64.12:2181 --topic test1
+]	
+
+结果：
+Topic:test1     PartitionCount:2        ReplicationFactor:1     Configs:
+        Topic: test1    Partition: 0    Leader: 0       Replicas: 0     Isr: 0
+        Topic: test1    Partition: 1    Leader: 0       Replicas: 0     Isr: 0
+
+```
+
+分区的作用：
+
+- 可以分布式存储
+- 可以并行写
+
+```
+/usr/kafka_2.11-2.3.0/cluster/00/logs/test-0
+
+-rw-r--r--. 1 root root 10485760 2月  20 18:01 00000000000000000000.index
+-rw-r--r--. 1 root root      957 2月  20 18:02 00000000000000000000.log ✔
+-rw-r--r--. 1 root root 10485756 2月  20 18:01 00000000000000000000.timeindex
+-rw-r--r--. 1 root root       10 2月  20 17:49 00000000000000000011.snapshot
+-rw-r--r--. 1 root root        8 2月  20 18:01 leader-epoch-checkpoint
+```
+
+![image-20220220180939604](../AppData/Roaming/Typora/typora-user-images/image-20220220180939604.png)
+
+>01 定期将自己消费分区的offset提交给kafka内部topic：`__consumer_offsets`，提交过去的 时候，key是consumerGroupId+topic+分区号，value就是当前offset的值
+>02 定期将自己消费分区的offset提交给kafka内部topic：`__consumer_offsets`，提交过去的 时候，key是consumerGroupId+topic+分区号，value就是当前offset的值
+>
+>03 offset要提交到`__consumer_offsets`的哪个分区 公式：hash(consumerGroupId) % __consumer_offsets主题的分区数
+
+## 创建副本
+
+```
+创建副本
+sh /usr/kafka_2.11-2.3.0/bin/kafka-topics.sh 
+	--zookeeper 172.16.253.35:2181 
+	--replication-factor 3 //创建副本
+	--partitions 2 
+	--topic my-replicated-topic
+	
+[
+sh /usr/kafka_2.11-2.3.0/bin/kafka-topics.sh --create --zookeeper 192.168.64.12:2181 --replication-factor 3 --partitions 2 --topic my-replicated-topic
+]
+```
+
+
+
+```
+查看副本
+sh /usr/kafka_2.11-2.3.0/bin/kafka-topics.sh --describe --zookeeper 192.168.64.12:2181 --topic my-replicated-topic
+```
+
+
+
+# problem
+
+## #01创建topic报错
+
+执行一下命令报错
+
+```sh
+sh /usr/kafka_2.11-2.3.0/bin/kafka-topics.sh --create --zookeeper 192.168.64.12:2181 --replication-factor 1 --partition 1 --topic test
+```
+
+
+
+```
+Exception in thread "main" joptsimple.UnrecognizedOptionException: partition is not a recognized option
+        at joptsimple.OptionException.unrecognizedOption(OptionException.java:108)
+        at joptsimple.OptionParser.handleLongOptionToken(OptionParser.java:510)
+        at joptsimple.OptionParserState$2.handleArgument(OptionParserState.java:56)
+        at joptsimple.OptionParser.parse(OptionParser.java:396)
+        at kafka.admin.TopicCommand$TopicCommandOptions.<init>(TopicCommand.scala:576)
+        at kafka.admin.TopicCommand$.main(TopicCommand.scala:49)
+        at kafka.admin.TopicCommand.main(TopicCommand.scala)
+```
+
+原因：
+
+```
+ --partition 1 changes to  --partitions 1
+```
+
+## #02 kafka的topic上线是多少
+
+https://cwiki.apache.org/confluence/display/KAFKA/FAQ#FAQ-HowdoesKafkadependonZookeeper?
+
+> How many topics can I have?
+> Unlike many messaging systems Kafka topics are meant to scale up arbitrarily(武断的). Hence we encourage fewer large topics rather than many small topics. So for example if we were storing notifications for users we would encourage a design with a single notifications topic partitioned by user id rather than a separate topic per user.
+>
+> The actual scalability is for the most part determined by the number of total partitions across all topics not the number of topics itself.
+
+```
+我可以有多少主题？
+与许多消息系统不同，Kafka 主题旨在任意扩展（武断的）。 
+因此，我们鼓励较少的大主题而不是许多小主题。 
+因此，例如，如果我们要为用户存储通知，我们会鼓励采用按用户 ID 划分的单个通知主题的设计，而不是每个用户一个单独的主题。
+
+实际可伸缩性在很大程度上取决于所有主题的总分区数，而不是主题本身的数量。
+```
+
+## #03单播消息生产者发送消息
+
+```
+[2022-02-20 16:35:10,952] WARN [Consumer clientId=consumer-1, groupId=testGroup] Connection to node -1 (/10.31.167.10:9092) could not be established. Broker may not be available. (org.apache.kafka.clients.NetworkClient)
+```
+
+分析：
+
+```
+[Consumer clientId=consumer-1, groupId=testGroup] Connection to node -1 (/10.31.167.10:9092) could not be established
+```
+
+连接不到broker示例，说明ip或者网络存在问题
+
+## #04 发送消息异常
+
+```
+org.apache.kafka.common.errors.TimeoutException: Topic my-replicated-topic not present in metadata after 60000 ms.
+Exception in thread "main" java.util.concurrent.ExecutionException: org.apache.kafka.common.errors.TimeoutException: Topic my-replicated-topic not present in metadata after 60000 ms.
+	at org.apache.kafka.clients.producer.KafkaProducer$FutureFailure.<init>(KafkaProducer.java:1299)
+	at org.apache.kafka.clients.producer.KafkaProducer.doSend(KafkaProducer.java:963)
+	at org.apache.kafka.clients.producer.KafkaProducer.send(KafkaProducer.java:865)
+	at org.apache.kafka.clients.producer.KafkaProducer.send(KafkaProducer.java:752)
+	at cn.nexriver.kafkademo.kafka.MySimpleProducer.main(MySimpleProducer.java:41)
+Caused by: org.apache.kafka.common.errors.TimeoutException: Topic my-replicated-topic not present in metadata after 60000 ms.
+
+```
+
+分析：
+
+```
+sh /usr/kafka_2.11-2.3.0/bin/kafka-topics.sh --describe --zookeeper 192.168.64.12:2181 --topic my-replicated-topic
+
+Topic:my-replicated-topic       PartitionCount:1        ReplicationFactor:1     Configs:
+Topic:my-replicated-topic      Partition: 0    Leader: 0       Replicas: 0     Isr: 0
+
+```
+
+解决：
+
+```shell
+# 新创建一个my-replicated-topic01的topic
+sh /usr/kafka_2.11-2.3.0/bin/kafka-topics.sh --create --zookeeper 192.168.64.12:2181 --replication-factor 3 --partitions 2 --topic my-replicated-topic01
+```
+
+```shell
+# 查看分区情况 my-replicated-topic01 2个
+sh /usr/kafka_2.11-2.3.0/bin/kafka-topics.sh --describe --zookeeper 192.168.64.12:2181 --topic my-replicated-topic01
+
+Topic:my-replicated-topic01     PartitionCount:2        ReplicationFactor:3     Configs:
+        Topic: my-replicated-topic01    Partition: 0    Leader: 0       Replicas: 0,1,2 Isr: 0,1,2
+        Topic: my-replicated-topic01    Partition: 1    Leader: 1       Replicas: 1,2,0 Isr: 1,2
+```
+
